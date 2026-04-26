@@ -4,9 +4,17 @@ from transformers import pipeline
 import plotly.express as px
 import plotly.graph_objects as go
 
-st.set_page_config(layout="wide")
+# PDF
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from io import BytesIO
+import plotly.io as pio
+from datetime import datetime
 
-st.title("📊 Product Feedback Analysis System")
+st.set_page_config(layout="wide")
+st.title("📊 Product Feedback Analysis")
 
 # ---------- MODEL ----------
 @st.cache_resource
@@ -15,7 +23,108 @@ def load_model():
 
 model = load_model()
 
-# ---------- UPLOAD ----------
+# ---------- FIG TO IMAGE ----------
+def fig_to_image(fig):
+    try:
+        img_bytes = pio.to_image(fig, format="png")
+        return BytesIO(img_bytes)
+    except:
+        return None
+
+# ---------- PDF ----------
+def generate_report(total, pos, neg, score, insights,
+                    fig2, fig_cat, fig_cs, fig3,
+                    best=None, worst=None):
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer)
+    styles = getSampleStyleSheet()
+
+    # 🎨 Styles
+    title_style = ParagraphStyle(
+        'title', parent=styles['Title'],
+        textColor=colors.HexColor("#6D28D9"),
+        spaceAfter=20
+    )
+
+    section_style = ParagraphStyle(
+        'section', parent=styles['Heading2'],
+        textColor=colors.HexColor("#2563EB"),
+        spaceAfter=10
+    )
+
+    normal = styles['Normal']
+
+    content = []
+
+    # ---------- COVER PAGE ----------
+    content.append(Spacer(1, 200))
+    content.append(Paragraph("Product Feedback Analysis System", title_style))
+    content.append(Spacer(1, 20))
+    content.append(Paragraph("Project Report", styles['Heading2']))
+    content.append(Spacer(1, 40))
+    content.append(Paragraph(f"Generated on: {datetime.now().strftime('%d %B %Y')}", normal))
+    content.append(PageBreak())
+
+    # ---------- INDEX ----------
+    content.append(Paragraph("Table of Contents", title_style))
+    content.append(Paragraph("1. Overview", normal))
+    content.append(Paragraph("2. Sentiment Distribution", normal))
+    content.append(Paragraph("3. Category Distribution", normal))
+    content.append(Paragraph("4. Category vs Sentiment", normal))
+    content.append(Paragraph("5. Monthly Trend", normal))
+    content.append(Paragraph("6. Product Insights", normal))
+    content.append(Paragraph("7. Key Insights", normal))
+    content.append(PageBreak())
+
+    # ---------- OVERVIEW ----------
+    content.append(Paragraph("1. Overview", section_style))
+    content.append(Paragraph(f"Total Reviews: {total}", normal))
+    content.append(Paragraph(f"Positive Reviews: {pos}", normal))
+    content.append(Paragraph(f"Negative Reviews: {neg}", normal))
+    content.append(Paragraph(f"Score (out of 5): {score}", normal))
+    content.append(Spacer(1, 20))
+
+    # ---------- CHARTS ----------
+    sections = [
+        ("2. Sentiment Distribution", fig2),
+        ("3. Category Distribution", fig_cat),
+        ("4. Category vs Sentiment", fig_cs),
+        ("5. Monthly Trend", fig3)
+    ]
+
+    for title, fig in sections:
+        if fig:
+            img = fig_to_image(fig)
+            if img:
+                content.append(Paragraph(title, section_style))
+                content.append(Image(img, width=5*inch, height=3*inch))
+                content.append(Spacer(1, 20))
+
+    # ---------- PRODUCT INSIGHTS ----------
+    if best is not None and worst is not None:
+        content.append(Paragraph("6. Product Insights", section_style))
+        content.append(Paragraph(f"Best Product: {best['product']}", normal))
+        content.append(Paragraph(f"Worst Product: {worst['product']}", normal))
+        content.append(Spacer(1, 20))
+
+    # ---------- INSIGHTS ----------
+    content.append(Paragraph("7. Key Insights", section_style))
+    for i in insights:
+        content.append(Paragraph(f"• {i}", normal))
+
+    content.append(Spacer(1, 20))
+
+    footer = ParagraphStyle('footer', parent=styles['Normal'],
+                            textColor=colors.grey, fontSize=8)
+
+    content.append(Paragraph("Generated using Product Feedback Analysis System", footer))
+
+    doc.build(content)
+    buffer.seek(0)
+    return buffer
+
+# ---------- FILE ----------
 uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
 if uploaded_file:
@@ -25,7 +134,7 @@ if uploaded_file:
         st.error("CSV must contain 'review' column")
         st.stop()
 
-    # ---------- SENTIMENT ----------
+    # SENTIMENT
     results = model(df['review'].tolist())
     df['sentiment'] = [r['label'] for r in results]
     df['confidence'] = [r['score'] for r in results]
@@ -35,164 +144,128 @@ if uploaded_file:
         "NEGATIVE": "Negative"
     })
 
-    # ---------- CATEGORY ----------
+    # CATEGORY
     def categorize(text):
-        text = text.lower()
-        if "price" in text:
-            return "Price"
-        elif "delivery" in text:
-            return "Delivery"
-        elif "package" in text:
-            return "Packaging"
-        else:
-            return "Quality"
+        text = str(text).lower()
+        return "Price" if "price" in text else "Quality"
 
     df['category'] = df['review'].apply(categorize)
 
-    # ---------- DATE ----------
+    # DATE
     if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'])
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
 
-    # ---------- PRODUCT FILTER ----------
+    # FILTER
     if 'product' in df.columns:
-        selected_product = st.selectbox("Filter by Product", ["All"] + list(df['product'].unique()))
+        selected = st.selectbox("Filter by Product", ["All"] + list(df['product'].dropna().unique()))
+        if selected != "All":
+            df = df[df['product'] == selected]
 
-        if selected_product != "All":
-            df = df[df['product'] == selected_product]
-
-    # ---------- KPIs ----------
+    # KPIs
     total = len(df)
     pos = (df['sentiment'] == "Positive").sum()
     neg = (df['sentiment'] == "Negative").sum()
+    score = round((pos / total) * 5, 2) if total else 0
 
-    score = round((pos / total) * 5, 2)
+    col1, col2, col3 = st.columns([2,2,1])
 
-    col1, col2, col3 = st.columns([2, 2, 1])
-
-    # ---------- GAUGE ----------
+    # GAUGE
     with col1:
         fig = go.Figure(go.Indicator(
             mode="gauge+number",
             value=score,
             title={'text': "Score (out of 5)"},
-            gauge={'axis': {'range': [0, 5]},
-                   'bar': {'color': "green"}}
+            gauge={'axis': {'range': [0,5]}}
         ))
         st.plotly_chart(fig, use_container_width=True)
 
-    # ---------- DONUT ----------
+    # DONUT
     with col2:
-        fig2 = px.pie(
-            df,
-            names='sentiment',
-            hole=0.6,
-            color='sentiment',
-            color_discrete_map={
-                "Positive": "#a855f7",
-                "Negative": "#ec4899"
-            }
-        )
+        fig2 = px.pie(df, names='sentiment', hole=0.6,
+                      color='sentiment',
+                      color_discrete_map={"Positive":"#22c55e","Negative":"#ef4444"})
         st.plotly_chart(fig2, use_container_width=True)
 
-    # ---------- METRICS ----------
+    # METRICS
     with col3:
-        st.metric("Total Reviews", total)
+        st.metric("Total", total)
         st.metric("Positive", pos)
         st.metric("Negative", neg)
 
-    # ---------- CATEGORY ----------
+    # CATEGORY
     st.subheader("📊 Category Distribution")
-
-    cat_counts = df['category'].value_counts().reset_index()
-    cat_counts.columns = ['Category', 'Count']
-
-    fig_cat = px.bar(cat_counts, x='Category', y='Count', color='Category')
+    cat = df['category'].value_counts().reset_index()
+    cat.columns = ['Category','Count']
+    fig_cat = px.bar(cat, x='Category', y='Count', color='Category')
     st.plotly_chart(fig_cat, use_container_width=True)
 
-    # ---------- CATEGORY vs SENTIMENT ----------
+    # CATEGORY VS SENTIMENT
     st.subheader("📊 Category vs Sentiment")
-
-    cat_sent = df.groupby(['category', 'sentiment']).size().reset_index(name='count')
-
-    fig_cs = px.bar(cat_sent, x='category', y='count', color='sentiment')
+    cs = df.groupby(['category','sentiment']).size().reset_index(name='count')
+    fig_cs = px.bar(cs, x='category', y='count', color='sentiment')
     st.plotly_chart(fig_cs, use_container_width=True)
 
-    # ---------- 📈 MONTHLY TIMELINE (FIXED) ----------
+    # MONTHLY
+    fig3 = None
     if 'date' in df.columns:
         st.subheader("📈 Monthly Sentiment Analysis")
-
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
         df['month'] = df['date'].dt.to_period('M').astype(str)
-
-        monthly = df.groupby(['month', 'sentiment']).size().reset_index(name='count')
-
-        fig3 = px.line(
-            monthly,
-            x='month',
-            y='count',
-            color='sentiment',
-            markers=True,
-            color_discrete_map={
-                "Positive": "#a855f7",
-                "Negative": "#ec4899"
-            }
-        )
-
+        monthly = df.groupby(['month','sentiment']).size().reset_index(name='count')
+        fig3 = px.line(monthly, x='month', y='count', color='sentiment', markers=True)
         st.plotly_chart(fig3, use_container_width=True)
 
-    # ---------- PRODUCT RANKING ----------
+
+    # RANKING
+    best = worst = None
     if 'product' in df.columns:
         st.subheader("🏆 Product Ranking")
+        rank = df.groupby('product').apply(
+            lambda x: (x['sentiment']=="Positive").sum()/len(x)
+        ).reset_index(name='score').sort_values(by='score', ascending=False)
 
-        product_stats = df.groupby('product').apply(
-            lambda x: (x['sentiment'] == "Positive").sum() / len(x)
-        ).reset_index(name='positive_ratio')
+        best = rank.iloc[0]
+        worst = rank.iloc[-1]
 
-        product_stats = product_stats.sort_values(by='positive_ratio', ascending=False)
+        c1,c2 = st.columns(2)
+        c1.success(f"Best: {best['product']}")
+        c2.error(f"Worst: {worst['product']}")
 
-        best = product_stats.iloc[0]
-        worst = product_stats.iloc[-1]
+        st.dataframe(rank)
 
-        c1, c2 = st.columns(2)
-
-        with c1:
-            st.success(f"🥇 Best Product: {best['product']} ({best['positive_ratio']*100:.1f}%)")
-
-        with c2:
-            st.error(f"⚠️ Worst Product: {worst['product']} ({worst['positive_ratio']*100:.1f}%)")
-
-        st.dataframe(product_stats)
-
-    
-
-    # ---------- INSIGHTS ----------
+    # INSIGHTS
     st.subheader("💡 Insights")
-
     insights = []
+    insights.append(f"Total reviews analyzed: {total}")
+    insights.append("Overall sentiment is positive" if pos > neg else "Overall sentiment is negative")
 
-    if pos > neg:
-        insights.append("Customers are generally satisfied with the product.")
-    else:
-        insights.append("Customers are generally dissatisfied with the product.")
+    if neg > 0:
+        top_issue = df[df['sentiment']=="Negative"]['category'].value_counts().idxmax()
+        insights.append(f"Major issue area: {top_issue}")
 
-    if df[df['category'] == "Delivery"].shape[0] > 0:
-        insights.append("Delivery-related issues are common.")
-
-    if df[df['category'] == "Price"].shape[0] > 0:
-        insights.append("Customers have concerns about pricing.")
+    if best is not None and worst is not None:
+        insights.append(f"Best product: {best['product']}")
+        insights.append(f"Worst product: {worst['product']}")
 
     for i in insights:
         st.write("•", i)
 
-    
+    # SUMMARY
+    st.subheader("🧾 Summary")
+    st.success(" ".join(insights))
 
-    # ---------- DATA ----------
-    st.subheader("📄 Data")
-    st.dataframe(df)
+    # DOWNLOAD CSV
+    st.download_button("Download CSV", df.to_csv(index=False), "data.csv")
 
-    # ---------- DOWNLOAD ----------
+    # DOWNLOAD PDF
+    pdf = generate_report(
+        total, pos, neg, score, insights,
+        fig2, fig_cat, fig_cs, fig3,
+        best, worst
+    )
+
     st.download_button(
-        "Download CSV",
-        df.to_csv(index=False),
-        file_name="analyzed_data.csv"
+        "📄 Download Final Report",
+        data=pdf,
+        file_name="final_report.pdf",
+        mime="application/pdf"
     )
