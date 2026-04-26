@@ -1,5 +1,7 @@
 streamlit
-transformers
-torch
 pandas
 plotly
+transformers
+torch
+reportlab
+kaleido==0.2.1
